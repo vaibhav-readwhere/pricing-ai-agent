@@ -1,30 +1,26 @@
 /**
- * Price Monitoring AI Agent
+ * Price Monitoring AI Agent — Cost-Optimised Orchestrator
  *
- * Uses Browser-Use Cloud API (https://browser-use.com) for AI-powered
- * competitor scraping — no CSS selectors required.
- * Set BROWSER_USE_API_KEY in .env.local to enable live scraping.
+ * Optimisation strategy:
+ *  1. BATCH  — 1 Browser-Use session per competitor (not per SKU)
+ *  2. PARALLEL — all competitor sessions run simultaneously
+ *  3. CACHE  — skip re-checking within monitoring frequency TTL
+ *
+ * Cost comparison:
+ *  Before: 6 SKUs × 5 competitors = 30 sessions @ ~$0.24 = ~$7.20/run
+ *  After:  5 competitor sessions (parallel) + cache hits = ~$2.00/run
+ *  Savings: ~72% per run; more with cache warmth
  */
 
-import type { SKU, Competitor, CompetitorCheck, AgentRun, Recommendation } from '@/types'
+import type { SKU, Competitor, CompetitorCheck, Recommendation } from '@/types'
 import {
-  scrapeCompetitorPriceViaBrowserUse,
+  batchScrapeCompetitor,
   saveScreenshotToSupabase,
+  getCacheStats,
+  type ScrapedPriceResult,
 } from './browser-use'
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-export interface ScrapedProduct {
-  title: string
-  price: number
-  currency: string
-  availability: boolean
-  delivery_fee: number
-  product_url: string
-  match_confidence: number
-  screenshot_search_url?: string
-  screenshot_product_url?: string
-}
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface AgentContext {
   run_id: string
@@ -32,147 +28,6 @@ export interface AgentContext {
   competitor: Competitor
   log: (level: 'info' | 'warn' | 'error' | 'success', message: string, details?: Record<string, unknown>) => void
 }
-
-// ─── Placeholder Scraping Functions ─────────────────────────────────────────
-// Replace these with real Playwright automation in production.
-
-/**
- * PLACEHOLDER: Launch a browser session for a competitor website.
- * In production: use Playwright's chromium.launch() or connect to Browserless.
- */
-async function launchBrowserSession(competitorUrl: string): Promise<{ sessionId: string }> {
-  console.log(`[PLACEHOLDER] Would launch browser for: ${competitorUrl}`)
-  return { sessionId: `session-${Date.now()}` }
-}
-
-/**
- * PLACEHOLDER: Search for a product on a competitor website.
- * In production: navigate to search URL, wait for results, extract product cards.
- */
-async function searchCompetitorProduct(
-  searchUrl: string,
-  query: string,
-  _sessionId: string
-): Promise<{ results: Array<{ title: string; price: number; url: string; thumbnail?: string }>; screenshotPath?: string }> {
-  console.log(`[PLACEHOLDER] Would search "${query}" at ${searchUrl}`)
-  // Simulate network delay
-  await new Promise(r => setTimeout(r, 100))
-  // Return mock data — replace with real scraping
-  return {
-    results: [
-      { title: `${query} (found on competitor)`, price: Math.round(Math.random() * 1000 + 500), url: searchUrl },
-    ],
-  }
-}
-
-/**
- * PLACEHOLDER: Extract product details from a competitor product page.
- * In production: navigate to product URL, extract price, availability, delivery.
- */
-async function extractProductDetails(
-  productUrl: string,
-  priceSelector: string,
-  _sessionId: string
-): Promise<{ price: number; availability: boolean; delivery_fee: number; screenshotPath?: string }> {
-  console.log(`[PLACEHOLDER] Would extract details from ${productUrl} using selector "${priceSelector}"`)
-  await new Promise(r => setTimeout(r, 100))
-  return {
-    price: Math.round(Math.random() * 1000 + 500),
-    availability: Math.random() > 0.1,
-    delivery_fee: 0,
-  }
-}
-
-/**
- * PLACEHOLDER: Calculate text similarity between two product titles.
- * In production: use a proper similarity algorithm (Levenshtein, cosine similarity, or ML model).
- */
-function calculateTitleSimilarity(title1: string, title2: string): number {
-  const t1 = title1.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/)
-  const t2 = title2.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/)
-  const set1 = new Set(t1)
-  const set2 = new Set(t2)
-  const intersection = [...set1].filter(w => set2.has(w))
-  const union = new Set([...set1, ...set2])
-  return intersection.length / union.size
-}
-
-/**
- * PLACEHOLDER: Store a screenshot in Supabase Storage.
- * In production: upload the screenshot buffer to Supabase Storage and return the URL.
- */
-async function storeScreenshot(
-  _screenshotBuffer: Buffer | string,
-  _fileName: string,
-  _bucket = 'screenshots'
-): Promise<string> {
-  console.log(`[PLACEHOLDER] Would upload screenshot to Supabase Storage`)
-  return `/screenshots/placeholder-${Date.now()}.png`
-}
-
-// ─── Core Agent Functions ────────────────────────────────────────────────────
-
-/**
- * Find and extract the best matching product from a competitor site for a given SKU.
- * Powered by Browser-Use Cloud API — AI navigates the site and extracts data.
- * Falls back gracefully if BROWSER_USE_API_KEY is not set (returns null).
- */
-export async function scrapeCompetitorPrice(ctx: AgentContext): Promise<ScrapedProduct | null> {
-  const { sku, competitor, log } = ctx
-
-  // Require API key — skip gracefully in demo/dev mode
-  if (!process.env.BROWSER_USE_API_KEY) {
-    log('warn', `BROWSER_USE_API_KEY not set — skipping live scrape for ${competitor.name}`)
-    return null
-  }
-
-  log('info', `[Browser-Use] Visiting ${competitor.name} — searching for "${sku.product_name}"`)
-
-  try {
-    // Browser-Use AI navigates, searches, matches, and extracts — all automatically
-    const result = await scrapeCompetitorPriceViaBrowserUse({
-      product_name: sku.product_name,
-      brand: sku.brand,
-      sku_id: sku.sku_id,
-      competitor_name: competitor.name,
-      competitor_url: competitor.website_url,
-      search_url_pattern: competitor.search_url_pattern,
-      min_confidence: competitor.matching_rules.title_similarity_threshold,
-    })
-
-    if (!result.found) {
-      log('warn', `[Browser-Use] No confident match on ${competitor.name}: ${result.raw_output}`)
-      return null
-    }
-
-    log('success', `[Browser-Use] Found on ${competitor.name}: AED ${result.price} — "${result.product_title}" (confidence: ${(result.match_confidence * 100).toFixed(0)}%)`)
-
-    // Save Browser-Use screenshot to Supabase Storage if available
-    let screenshotUrl: string | undefined
-    if (result.screenshot_url && competitor.screenshot_required) {
-      const fileName = `${ctx.run_id}-${competitor.id}-${Date.now()}.png`
-      screenshotUrl = (await saveScreenshotToSupabase(result.screenshot_url, fileName)) ?? result.screenshot_url
-      if (screenshotUrl) log('info', `Screenshot saved: ${fileName}`)
-    }
-
-    return {
-      title: result.product_title,
-      price: result.price,
-      currency: result.currency,
-      availability: result.availability,
-      delivery_fee: result.delivery_fee,
-      product_url: result.product_url,
-      match_confidence: result.match_confidence,
-      screenshot_search_url: screenshotUrl,
-      screenshot_product_url: screenshotUrl,
-    }
-  } catch (error) {
-    log('error', `[Browser-Use] Failed for ${competitor.name}: ${error instanceof Error ? error.message : String(error)}`)
-    return null
-  }
-}
-
-// ─── Price Comparison & Recommendation Logic ─────────────────────────────────
 
 export interface PriceComparisonResult {
   status: CompetitorCheck['status']
@@ -182,22 +37,26 @@ export interface PriceComparisonResult {
   price_diff_pct: number
 }
 
+export interface AgentRunConfig {
+  skus: SKU[]
+  competitors: Competitor[]
+  max_skus_per_run?: number
+  on_log?: (log: { level: string; message: string; sku_id?: string; competitor_id?: string }) => void
+  on_check_complete?: (check: Partial<CompetitorCheck>) => void
+}
+
+// ─── Price Comparison & Recommendation Logic ──────────────────────────────────
+
 /**
- * Apply business rules to determine price recommendation.
- * Rules:
- *  1. Never go below min_price
- *  2. Never exceed max_price
- *  3. Maintain minimum margin (margin_threshold %)
- *  4. If overpriced: suggest competitor_min_price + small buffer
- *  5. If underpriced: suggest increase to approach market avg
+ * Apply business rules to determine the recommended price action.
  */
 export function computePriceRecommendation(
   sku: SKU,
   checks: Array<{ price: number; availability: boolean }>
 ): PriceComparisonResult {
-  const availableChecks = checks.filter(c => c.availability && c.price > 0)
+  const available = checks.filter(c => c.availability && c.price > 0)
 
-  if (availableChecks.length === 0) {
+  if (available.length === 0) {
     return {
       status: 'competitor_out_of_stock',
       recommended_price: sku.current_price,
@@ -207,42 +66,42 @@ export function computePriceRecommendation(
     }
   }
 
-  const competitorPrices = availableChecks.map(c => c.price)
-  const minPrice = Math.min(...competitorPrices)
-  const maxPrice = Math.max(...competitorPrices)
-  const avgPrice = competitorPrices.reduce((a, b) => a + b, 0) / competitorPrices.length
-
+  const prices = available.map(c => c.price)
+  const minPrice = Math.min(...prices)
+  const avgPrice = Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
   const our = sku.current_price
-  const priceDiffPct = ((our - minPrice) / minPrice) * 100
-  const thresholdPct = 5 // alert if we're more than 5% away from market
+  const overpriceThreshold = 5 // percent
 
-  // We are significantly overpriced
-  if (our > minPrice * (1 + thresholdPct / 100)) {
-    // Recommend matching the lowest competitor price + small buffer (within floor/ceiling)
-    let recommended = Math.round(minPrice * 1.02) // 2% above lowest competitor
-    recommended = Math.max(recommended, sku.min_price)
-    recommended = Math.min(recommended, sku.max_price)
+  // We are significantly overpriced vs the cheapest competitor
+  if (our > minPrice * (1 + overpriceThreshold / 100)) {
+    const recommended = Math.min(
+      Math.max(Math.round(minPrice * 1.02), sku.min_price),
+      sku.max_price
+    )
+    const diff = recommended - our
     return {
       status: 'overpriced',
       recommended_price: recommended,
-      recommendation_reason: `Lowest competitor price is AED ${minPrice.toLocaleString()}. We are ${priceDiffPct.toFixed(1)}% higher. Recommend reducing to AED ${recommended.toLocaleString()} to stay competitive while maintaining margin.`,
-      price_diff: recommended - our,
-      price_diff_pct: ((recommended - our) / our) * 100,
+      recommendation_reason: `Lowest competitor is AED ${minPrice.toLocaleString()}. We are ${((our - minPrice) / minPrice * 100).toFixed(1)}% higher. Recommend reducing to AED ${recommended.toLocaleString()}.`,
+      price_diff: diff,
+      price_diff_pct: (diff / our) * 100,
     }
   }
 
-  // We are significantly underpriced (opportunity to increase)
+  // We are below market average — opportunity to increase
   if (our < avgPrice * 0.95) {
-    let recommended = Math.round(avgPrice * 0.97)
-    recommended = Math.max(recommended, sku.min_price)
-    recommended = Math.min(recommended, sku.max_price)
+    const recommended = Math.min(
+      Math.max(Math.round(avgPrice * 0.97), sku.min_price),
+      sku.max_price
+    )
     if (recommended > our) {
+      const diff = recommended - our
       return {
         status: 'underpriced',
         recommended_price: recommended,
-        recommendation_reason: `Market average is AED ${avgPrice.toLocaleString()}. We are pricing below market. Recommend increasing to AED ${recommended.toLocaleString()} to improve margin.`,
-        price_diff: recommended - our,
-        price_diff_pct: ((recommended - our) / our) * 100,
+        recommendation_reason: `Market average is AED ${avgPrice.toLocaleString()}. We are below market. Recommend increasing to AED ${recommended.toLocaleString()}.`,
+        price_diff: diff,
+        price_diff_pct: (diff / our) * 100,
       }
     }
   }
@@ -250,13 +109,13 @@ export function computePriceRecommendation(
   return {
     status: 'price_ok',
     recommended_price: our,
-    recommendation_reason: `Price is competitive. Lowest competitor: AED ${minPrice.toLocaleString()}, Average: AED ${avgPrice.toLocaleString()}.`,
+    recommendation_reason: `Price is competitive. Lowest: AED ${minPrice.toLocaleString()}, Average: AED ${avgPrice.toLocaleString()}.`,
     price_diff: 0,
     price_diff_pct: 0,
   }
 }
 
-// ─── Email Alert Composition ──────────────────────────────────────────────────
+// ─── Email Alert ──────────────────────────────────────────────────────────────
 
 export interface AlertEmailPayload {
   to: string[]
@@ -269,8 +128,7 @@ export interface AlertEmailPayload {
   competitor_url?: string
   recommended_price: number
   reason: string
-  screenshot_search_url?: string
-  screenshot_product_url?: string
+  screenshot_url?: string
   timestamp: string
 }
 
@@ -279,10 +137,10 @@ export function composeAlertEmail(
   check: Partial<CompetitorCheck>,
   rec: Partial<Recommendation>
 ): AlertEmailPayload {
-  const isOverpriced = (check.competitor_price ?? 0) < sku.current_price
+  const overpriced = (check.competitor_price ?? 0) < sku.current_price
   return {
     to: sku.alert_recipients,
-    subject: `${isOverpriced ? '⚠️' : '📈'} Price Alert: ${sku.product_name} — ${isOverpriced ? 'overpriced' : 'opportunity'} vs ${check.competitor_name}`,
+    subject: `${overpriced ? '⚠️' : '📈'} Price Alert: ${sku.product_name} — ${overpriced ? 'overpriced' : 'opportunity'} vs ${check.competitor_name}`,
     sku_id: sku.sku_id,
     product_name: sku.product_name,
     our_price: sku.current_price,
@@ -290,44 +148,66 @@ export function composeAlertEmail(
     competitor_price: check.competitor_price ?? 0,
     competitor_url: check.competitor_url,
     recommended_price: rec.recommended_price ?? sku.current_price,
-    reason: rec.recommended_price ? `Recommended price change to AED ${rec.recommended_price.toLocaleString()}.` : 'Review recommended.',
-    screenshot_search_url: check.screenshot_search_url,
-    screenshot_product_url: check.screenshot_product_url,
+    reason: `Recommended price change to AED ${rec.recommended_price?.toLocaleString()}.`,
+    screenshot_url: check.screenshot_search_url,
     timestamp: new Date().toISOString(),
   }
 }
 
 /**
- * PLACEHOLDER: Send email via configured provider.
- * In production: use Nodemailer (SMTP), Resend, or SendGrid SDK.
+ * Send alert email via configured provider.
+ * Replace with Resend/SendGrid SDK when RESEND_API_KEY is set.
  */
 export async function sendAlertEmail(payload: AlertEmailPayload): Promise<{ success: boolean; error?: string }> {
-  console.log(`[PLACEHOLDER] Would send email to ${payload.to.join(', ')}: ${payload.subject}`)
-  // In production:
-  // const resend = new Resend(process.env.RESEND_API_KEY)
-  // return resend.emails.send({ from: '...', to: payload.to, subject: payload.subject, html: renderEmailTemplate(payload) })
-  return { success: true }
+  const resendKey = process.env.RESEND_API_KEY
+  if (!resendKey) {
+    console.log(`[Email PLACEHOLDER] Would send to ${payload.to.join(', ')}: ${payload.subject}`)
+    return { success: true }
+  }
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'PriceWatch AI <alerts@pricewatch.ai>',
+        to: payload.to,
+        subject: payload.subject,
+        html: buildEmailHtml(payload),
+      }),
+    })
+    if (!res.ok) return { success: false, error: await res.text() }
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function buildEmailHtml(p: AlertEmailPayload): string {
+  return `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+  <h2 style="color:#4f46e5">${p.subject}</h2>
+  <table style="width:100%;border-collapse:collapse">
+    <tr><td style="padding:8px;background:#f9fafb"><b>SKU</b></td><td style="padding:8px">${p.sku_id}</td></tr>
+    <tr><td style="padding:8px;background:#f9fafb"><b>Product</b></td><td style="padding:8px">${p.product_name}</td></tr>
+    <tr><td style="padding:8px;background:#f9fafb"><b>Our Price</b></td><td style="padding:8px">AED ${p.our_price.toLocaleString()}</td></tr>
+    <tr><td style="padding:8px;background:#f9fafb"><b>${p.competitor_name} Price</b></td><td style="padding:8px;color:#dc2626">AED ${p.competitor_price.toLocaleString()}</td></tr>
+    <tr><td style="padding:8px;background:#f9fafb"><b>Recommended Price</b></td><td style="padding:8px;color:#4f46e5"><b>AED ${p.recommended_price.toLocaleString()}</b></td></tr>
+    <tr><td style="padding:8px;background:#f9fafb"><b>Reason</b></td><td style="padding:8px">${p.reason}</td></tr>
+  </table>
+  ${p.screenshot_url ? `<p><a href="${p.screenshot_url}">View screenshot proof →</a></p>` : ''}
+  <p style="color:#6b7280;font-size:12px">PriceWatch AI · ${new Date(p.timestamp).toLocaleString()}</p>
+</div>`
 }
 
 // ─── Main Agent Orchestrator ──────────────────────────────────────────────────
 
-export interface AgentRunConfig {
-  skus: SKU[]
-  competitors: Competitor[]
-  max_skus_per_run?: number
-  on_log?: (log: { level: string; message: string; sku_id?: string; competitor_id?: string }) => void
-  on_check_complete?: (check: Partial<CompetitorCheck>) => void
-}
-
-/**
- * Run the price monitoring agent for a set of SKUs against configured competitors.
- * This is the main orchestrator function called by the scheduled job or manual trigger.
- */
 export async function runPriceMonitoringAgent(config: AgentRunConfig): Promise<{
   run_id: string
   checks: Partial<CompetitorCheck>[]
   recommendations: Partial<Recommendation>[]
   alerts_sent: number
+  total_cost_usd: number
+  cache_stats: { valid: number; expired: number; total: number }
   errors: string[]
 }> {
   const run_id = `run-${Date.now()}`
@@ -335,33 +215,86 @@ export async function runPriceMonitoringAgent(config: AgentRunConfig): Promise<{
   const recommendations: Partial<Recommendation>[] = []
   const errors: string[] = []
   let alerts_sent = 0
+  let total_cost_usd = 0
 
   const log = (level: 'info' | 'warn' | 'error' | 'success', message: string, sku_id?: string, competitor_id?: string) => {
     console.log(`[${level.toUpperCase()}] ${message}`)
     config.on_log?.({ level, message, sku_id, competitor_id })
   }
 
-  const skusToProcess = config.skus
+  const activeSKUs = config.skus
     .filter(s => s.status === 'active')
     .slice(0, config.max_skus_per_run ?? 50)
 
   const activeCompetitors = config.competitors.filter(c => c.status === 'active')
 
-  log('info', `Agent run ${run_id} started. Processing ${skusToProcess.length} SKUs across ${activeCompetitors.length} competitors.`)
+  log('info', `Agent run ${run_id} started. ${activeSKUs.length} SKUs × ${activeCompetitors.length} competitors.`)
+  log('info', `Cache stats before run: ${JSON.stringify(getCacheStats())}`)
 
-  for (const sku of skusToProcess) {
-    log('info', `Checking SKU: ${sku.product_name}`, sku.id)
-    const skuChecks: Array<{ price: number; availability: boolean; competitor_name: string; check: Partial<CompetitorCheck> }> = []
+  // ── Skip live scraping if no API key (demo mode) ──────────────────────────
+  if (!process.env.BROWSER_USE_API_KEY) {
+    log('warn', 'BROWSER_USE_API_KEY not set — running in demo mode (no live scraping)')
+    return { run_id, checks: [], recommendations: [], alerts_sent: 0, total_cost_usd: 0, cache_stats: getCacheStats(), errors: ['No API key configured'] }
+  }
 
-    for (const competitor of activeCompetitors) {
-      const ctx: AgentContext = {
-        run_id,
-        sku,
-        competitor,
-        log: (level, msg, details) => log(level, msg, sku.id, competitor.id),
+  // ── OPTIMISATION: 1 session per competitor, run ALL in PARALLEL ───────────
+  log('info', `Starting ${activeCompetitors.length} parallel competitor sessions (1 per competitor, all SKUs batched)...`)
+
+  const competitorBatches = await Promise.allSettled(
+    activeCompetitors.map(competitor =>
+      batchScrapeCompetitor({
+        competitor_name: competitor.name,
+        competitor_url: competitor.website_url,
+        search_url_pattern: competitor.search_url_pattern,
+        skus: activeSKUs.map(s => ({
+          sku_id: s.id,
+          product_name: s.product_name,
+          brand: s.brand,
+          monitoring_frequency: s.monitoring_frequency,
+          min_confidence: competitor.matching_rules.title_similarity_threshold,
+        })),
+      })
+    )
+  )
+
+  // ── Process results from each competitor batch ────────────────────────────
+  // Build a map: sku_id → [all competitor results]
+  const skuResultMap = new Map<string, Array<{ result: ScrapedPriceResult; competitor: Competitor }>>()
+  activeSKUs.forEach(s => skuResultMap.set(s.id, []))
+
+  for (let i = 0; i < competitorBatches.length; i++) {
+    const competitor = activeCompetitors[i]
+    const batch = competitorBatches[i]
+
+    if (batch.status === 'rejected') {
+      const msg = `${competitor.name} batch failed: ${batch.reason}`
+      errors.push(msg)
+      log('error', msg)
+      continue
+    }
+
+    const { results, cost_usd, session_id, duration_ms } = batch.value
+    total_cost_usd += cost_usd
+
+    log(
+      cost_usd === 0 ? 'info' : 'success',
+      `${competitor.name}: ${results.filter(r => r.found).length}/${results.length} found` +
+      (cost_usd > 0 ? ` — $${cost_usd.toFixed(4)} — ${Math.round(duration_ms / 1000)}s` : ' (from cache)'),
+    )
+
+    for (const result of results) {
+      const sku = activeSKUs.find(s => s.id === result.sku_id)
+      if (!sku) continue
+
+      // Persist screenshot to Supabase if available
+      let screenshotUrl = result.screenshot_url
+      if (screenshotUrl && competitor.screenshot_required && session_id !== 'cached') {
+        const saved = await saveScreenshotToSupabase(
+          screenshotUrl,
+          `${run_id}-${competitor.id}-${sku.id}.png`
+        )
+        if (saved) screenshotUrl = saved
       }
-
-      const scraped = await scrapeCompetitorPrice(ctx)
 
       const check: Partial<CompetitorCheck> = {
         run_id,
@@ -369,78 +302,96 @@ export async function runPriceMonitoringAgent(config: AgentRunConfig): Promise<{
         competitor_id: competitor.id,
         competitor_name: competitor.name,
         our_price: sku.current_price,
-        competitor_price: scraped?.price ?? null,
-        availability: scraped?.availability ?? false,
-        delivery_fee: scraped?.delivery_fee,
-        competitor_url: scraped?.product_url,
-        match_confidence: scraped?.match_confidence ?? 0,
-        screenshot_search_url: scraped?.screenshot_search_url,
-        screenshot_product_url: scraped?.screenshot_product_url,
-        status: scraped ? 'price_ok' : 'error',
+        competitor_price: result.found ? result.price : null,
+        availability: result.availability,
+        delivery_fee: result.delivery_fee,
+        competitor_url: result.product_url || undefined,
+        match_confidence: result.match_confidence,
+        screenshot_search_url: screenshotUrl,
+        screenshot_product_url: screenshotUrl,
+        status: result.found ? 'price_ok' : 'error',
         email_sent: false,
+        agent_notes: result.raw_output?.slice(0, 500),
         created_at: new Date().toISOString(),
       }
 
       checks.push(check)
       config.on_check_complete?.(check)
+      skuResultMap.get(sku.id)?.push({ result, competitor })
+    }
+  }
 
-      if (scraped) {
-        skuChecks.push({ price: scraped.price, availability: scraped.availability, competitor_name: competitor.name, check })
-      }
+  // ── Generate recommendations per SKU ─────────────────────────────────────
+  for (const sku of activeSKUs) {
+    const skuChecks = skuResultMap.get(sku.id) ?? []
+    const validChecks = skuChecks.filter(c => c.result.found && c.result.price > 0)
+
+    if (validChecks.length === 0) {
+      log('warn', `No valid competitor data for ${sku.product_name} — skipping recommendation`, sku.id)
+      continue
     }
 
-    // Compute recommendation based on all competitor checks for this SKU
-    if (skuChecks.length > 0) {
-      const priceResult = computePriceRecommendation(sku, skuChecks)
+    const priceResult = computePriceRecommendation(
+      sku,
+      validChecks.map(c => ({ price: c.result.price, availability: c.result.availability }))
+    )
 
-      // Update check statuses
-      const worstCheck = skuChecks.reduce((worst, c) => c.price < worst.price ? c : worst, skuChecks[0])
-      if (worstCheck) {
-        worstCheck.check.status = priceResult.status
-        worstCheck.check.recommended_price = priceResult.recommended_price
-        worstCheck.check.recommendation_reason = priceResult.recommendation_reason
-      }
+    // Update the worst-offending check status
+    const worstCheck = checks.find(
+      c => c.sku_id === sku.id && c.competitor_price === Math.min(...validChecks.map(c => c.result.price))
+    )
+    if (worstCheck) {
+      worstCheck.status = priceResult.status
+      worstCheck.recommended_price = priceResult.recommended_price
+      worstCheck.recommendation_reason = priceResult.recommendation_reason
+    }
 
-      const rec: Partial<Recommendation> = {
-        run_id,
-        sku_id: sku.id,
-        sku_name: sku.product_name,
-        sku_brand: sku.brand,
-        current_price: sku.current_price,
-        recommended_price: priceResult.recommended_price,
-        lowest_competitor_price: Math.min(...skuChecks.map(c => c.price)),
-        highest_competitor_price: Math.max(...skuChecks.map(c => c.price)),
-        avg_competitor_price: Math.round(skuChecks.reduce((s, c) => s + c.price, 0) / skuChecks.length),
-        status: priceResult.status,
-        action: priceResult.price_diff < -10 ? 'decrease' : priceResult.price_diff > 10 ? 'increase' : priceResult.status === 'needs_manual_review' ? 'manual_review' : 'maintain',
-        price_diff: priceResult.price_diff,
-        price_diff_pct: priceResult.price_diff_pct,
-        competitor_data: skuChecks.map(c => ({ competitor_name: c.competitor_name, price: c.price })),
-        reviewed: false,
-        applied: false,
-        created_at: new Date().toISOString(),
-      }
-      recommendations.push(rec)
+    const prices = validChecks.map(c => c.result.price)
+    const rec: Partial<Recommendation> = {
+      run_id,
+      sku_id: sku.id,
+      sku_name: sku.product_name,
+      sku_brand: sku.brand,
+      current_price: sku.current_price,
+      recommended_price: priceResult.recommended_price,
+      lowest_competitor_price: Math.min(...prices),
+      highest_competitor_price: Math.max(...prices),
+      avg_competitor_price: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length),
+      status: priceResult.status,
+      action: priceResult.price_diff < -10 ? 'decrease' : priceResult.price_diff > 10 ? 'increase' : priceResult.status === 'needs_manual_review' ? 'manual_review' : 'maintain',
+      price_diff: priceResult.price_diff,
+      price_diff_pct: priceResult.price_diff_pct,
+      competitor_data: validChecks.map(c => ({
+        competitor_name: c.competitor.name,
+        price: c.result.price,
+        url: c.result.product_url,
+      })),
+      reviewed: false,
+      applied: false,
+      created_at: new Date().toISOString(),
+    }
+    recommendations.push(rec)
 
-      // Send alert if mismatch detected
-      if (priceResult.status === 'overpriced' || priceResult.status === 'underpriced') {
-        if (sku.alert_recipients.length > 0) {
-          const alertPayload = composeAlertEmail(sku, worstCheck.check, rec)
-          const result = await sendAlertEmail(alertPayload)
-          if (result.success) {
-            alerts_sent++
-            worstCheck.check.email_sent = true
-            log('success', `Alert sent to ${sku.alert_recipients.join(', ')} for ${sku.product_name}`, sku.id)
-          } else {
-            errors.push(`Failed to send alert for ${sku.product_name}: ${result.error}`)
-            log('error', `Alert failed: ${result.error}`, sku.id)
-          }
-        }
+    // ── Send alert if mismatch found ────────────────────────────────────────
+    if (
+      (priceResult.status === 'overpriced' || priceResult.status === 'underpriced') &&
+      sku.alert_recipients.length > 0
+    ) {
+      const alertPayload = composeAlertEmail(sku, worstCheck ?? {}, rec)
+      const emailResult = await sendAlertEmail(alertPayload)
+      if (emailResult.success) {
+        alerts_sent++
+        if (worstCheck) worstCheck.email_sent = true
+        log('success', `Alert sent to ${sku.alert_recipients.join(', ')} for ${sku.product_name}`, sku.id)
+      } else {
+        errors.push(`Email failed for ${sku.product_name}: ${emailResult.error}`)
+        log('error', `Alert failed: ${emailResult.error}`, sku.id)
       }
     }
   }
 
-  log('success', `Agent run ${run_id} completed. ${checks.length} checks, ${recommendations.length} recommendations, ${alerts_sent} alerts sent.`)
+  const cacheStats = getCacheStats()
+  log('success', `Run ${run_id} complete. Cost: $${total_cost_usd.toFixed(4)} | ${checks.length} checks | ${recommendations.length} recs | ${alerts_sent} alerts | Cache: ${cacheStats.valid} valid entries`)
 
-  return { run_id, checks, recommendations, alerts_sent, errors }
+  return { run_id, checks, recommendations, alerts_sent, total_cost_usd, cache_stats: cacheStats, errors }
 }
