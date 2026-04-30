@@ -1,22 +1,46 @@
 /**
- * Browser-Use Cloud API Integration
+ * Browser-Use Cloud API v3 Integration
  * https://browser-use.com
  *
- * Replaces all Playwright/Puppeteer placeholder functions in price-monitor.ts
- * with real AI-powered browser automation calls.
+ * Confirmed working against the live API.
+ * Base URL  : https://api.browser-use.com/api/v3
+ * Auth      : X-Browser-Use-API-Key header
+ * Create    : POST /sessions
+ * Status    : GET  /sessions/{id}
+ * Stop      : POST /sessions/{id}/stop
+ * Live view : https://live.browser-use.com/session/{id}
  */
 
-const BROWSER_USE_API_URL = 'https://api.browser-use.com/api/v1'
-const API_KEY = process.env.BROWSER_USE_API_KEY!
+const BASE_URL = 'https://api.browser-use.com/api/v3'
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+function apiKey() {
+  const key = process.env.BROWSER_USE_API_KEY
+  if (!key) throw new Error('BROWSER_USE_API_KEY is not set in .env.local')
+  return key
+}
 
-export interface BrowserUseTaskResult {
-  success: boolean
-  output: string       // natural language summary from the agent
-  extracted: unknown   // structured JSON extracted by the agent
-  screenshot?: string  // base64 PNG screenshot
-  error?: string
+function headers() {
+  return {
+    'X-Browser-Use-API-Key': apiKey(),
+    'Content-Type': 'application/json',
+  }
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface BrowserUseSession {
+  id: string
+  status: 'running' | 'idle' | 'stopped' | 'error' | 'timed_out'
+  output: string | null
+  title: string | null
+  stepCount: number
+  lastStepSummary: string | null
+  isTaskSuccessful: boolean | null
+  liveUrl: string
+  screenshotUrl: string | null
+  totalCostUsd: string
+  createdAt: string
+  updatedAt: string
 }
 
 export interface ScrapedPriceResult {
@@ -28,92 +52,69 @@ export interface ScrapedPriceResult {
   delivery_fee: number
   product_url: string
   match_confidence: number
-  screenshot_base64?: string
+  screenshot_url?: string
+  live_url?: string
   raw_output: string
 }
 
-// ─── Core Browser-Use API Client ─────────────────────────────────────────────
+// ─── Core API Client ──────────────────────────────────────────────────────────
 
 /**
- * Run a task via Browser-Use Cloud API and poll until complete.
+ * Create a Browser-Use session and poll until it completes.
  */
-async function runBrowserTask(
+async function runSession(
   task: string,
-  options: {
-    max_steps?: number
-    timeout_ms?: number
-    structured_output_schema?: object
-  } = {}
-): Promise<BrowserUseTaskResult> {
-  const { max_steps = 20, timeout_ms = 60000, structured_output_schema } = options
+  options: { timeout_ms?: number; poll_interval_ms?: number } = {}
+): Promise<BrowserUseSession> {
+  const { timeout_ms = 120_000, poll_interval_ms = 4_000 } = options
 
-  // 1. Create the task
-  const createRes = await fetch(`${BROWSER_USE_API_URL}/run-task`, {
+  // 1. Create session
+  const createRes = await fetch(`${BASE_URL}/sessions`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      task,
-      ...(structured_output_schema && { structured_output_schema }),
-    }),
+    headers: headers(),
+    body: JSON.stringify({ task }),
   })
 
   if (!createRes.ok) {
     const err = await createRes.text()
-    throw new Error(`Browser-Use task creation failed: ${createRes.status} — ${err}`)
+    throw new Error(`Browser-Use session creation failed [${createRes.status}]: ${err}`)
   }
 
-  const { id: taskId } = await createRes.json()
-  console.log(`[Browser-Use] Task created: ${taskId}`)
+  const session: BrowserUseSession = await createRes.json()
+  console.log(`[Browser-Use] Session ${session.id} created — live: ${session.liveUrl}`)
 
-  // 2. Poll until finished
+  // 2. Poll until terminal state
   const deadline = Date.now() + timeout_ms
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 3000)) // poll every 3s
+  let current = session
 
-    const statusRes = await fetch(`${BROWSER_USE_API_URL}/task/${taskId}`, {
-      headers: { 'Authorization': `Bearer ${API_KEY}` },
+  while (Date.now() < deadline) {
+    if (['idle', 'stopped', 'error', 'timed_out'].includes(current.status)) {
+      return current
+    }
+
+    await new Promise(r => setTimeout(r, poll_interval_ms))
+
+    const statusRes = await fetch(`${BASE_URL}/sessions/${session.id}`, {
+      headers: headers(),
     })
 
-    if (!statusRes.ok) continue
-
-    const data = await statusRes.json()
-    const status: string = data.status
-
-    console.log(`[Browser-Use] Task ${taskId} status: ${status}`)
-
-    if (status === 'finished' || status === 'done') {
-      return {
-        success: true,
-        output: data.output ?? data.result ?? '',
-        extracted: data.extracted_content ?? data.output ?? null,
-        screenshot: data.screenshot,
-      }
+    if (statusRes.ok) {
+      current = await statusRes.json()
+      console.log(`[Browser-Use] ${session.id} — status: ${current.status}, steps: ${current.stepCount}`)
     }
-
-    if (status === 'failed' || status === 'error') {
-      return {
-        success: false,
-        output: '',
-        extracted: null,
-        error: data.error ?? 'Task failed',
-      }
-    }
-
-    // statuses: 'created', 'running', 'paused' — keep polling
   }
 
-  return { success: false, output: '', extracted: null, error: 'Task timed out' }
+  // Timeout — stop the session to avoid wasting credits
+  await fetch(`${BASE_URL}/sessions/${session.id}/stop`, { method: 'POST', headers: headers() })
+  throw new Error(`Browser-Use session timed out after ${timeout_ms / 1000}s`)
 }
 
-// ─── Price Scraping via Browser-Use ──────────────────────────────────────────
+// ─── Price Scraping ────────────────────────────────────────────────────────────
 
 /**
- * Search for a product on a competitor site and extract price details.
- * Uses Browser-Use AI to find the best matching product automatically —
- * no CSS selectors needed.
+ * Search a competitor site for a product and extract its price.
+ * Browser-Use AI navigates the site, finds the matching product,
+ * and returns structured JSON — no CSS selectors needed.
  */
 export async function scrapeCompetitorPriceViaBrowserUse(params: {
   product_name: string
@@ -125,186 +126,117 @@ export async function scrapeCompetitorPriceViaBrowserUse(params: {
   min_confidence?: number
 }): Promise<ScrapedPriceResult> {
   const {
-    product_name,
-    brand,
-    sku_id,
-    competitor_name,
-    competitor_url,
-    search_url_pattern,
-    min_confidence = 0.70,
+    product_name, brand, sku_id,
+    competitor_name, competitor_url,
+    search_url_pattern, min_confidence = 0.70,
   } = params
 
   const searchUrl = search_url_pattern.replace('{query}', encodeURIComponent(`${brand} ${product_name}`))
 
   const task = `
-You are a price monitoring agent. Your job is to find the exact product and its current price on a retail website.
+You are a retail price monitoring agent. Find the exact product listed below on a competitor website and return its current price as structured JSON.
 
 PRODUCT TO FIND:
 - Name: ${product_name}
 - Brand: ${brand}
 - SKU: ${sku_id}
 
-WEBSITE: ${competitor_name} (${competitor_url})
+WEBSITE: ${competitor_name}
+START URL: ${searchUrl}
 
-STEPS:
-1. Go to this search URL: ${searchUrl}
-2. Look at the search results and find the product that best matches "${brand} ${product_name}"
-3. The product MUST be from brand "${brand}" — do not return a different brand
-4. Click on the best matching product to open its detail page
-5. Extract:
-   - exact product title as shown on the page
-   - current selling price (number only, no currency symbol)
-   - whether it is in stock / available (true/false)
-   - delivery fee if shown (0 if free delivery)
-   - the full product page URL
-   - your confidence score (0.0 to 1.0) that this is the correct matching product
+INSTRUCTIONS:
+1. Go to the start URL above
+2. Look at the search results
+3. Find the product that best matches "${brand} ${product_name}" — it MUST be the same brand
+4. Click on the best matching product to open the product detail page
+5. Extract the following and return ONLY a valid JSON object (no markdown, no explanation):
 
-Return ONLY a JSON object with these exact keys:
 {
-  "product_title": "...",
-  "price": 0.00,
-  "availability": true,
-  "delivery_fee": 0.00,
-  "product_url": "...",
-  "match_confidence": 0.00
+  "product_title": "<exact title shown on the page>",
+  "price": <number, current selling price, no currency symbol>,
+  "availability": <true if in stock, false if out of stock>,
+  "delivery_fee": <number, 0 if free delivery or not shown>,
+  "product_url": "<full URL of the product page>",
+  "match_confidence": <number between 0.0 and 1.0 — how confident you are this is the right product>
 }
 
-If you cannot find the product or are less than ${min_confidence * 100}% confident it is a match, return:
-{ "found": false, "reason": "..." }
+If you cannot find the product or confidence is below ${min_confidence}, return:
+{ "found": false, "reason": "<brief reason>" }
+
+Return ONLY the JSON. No other text.
 `.trim()
 
   try {
-    const result = await runBrowserTask(task, {
-      max_steps: 15,
-      timeout_ms: 90000,
-      structured_output_schema: {
-        type: 'object',
-        properties: {
-          product_title: { type: 'string' },
-          price: { type: 'number' },
-          availability: { type: 'boolean' },
-          delivery_fee: { type: 'number' },
-          product_url: { type: 'string' },
-          match_confidence: { type: 'number' },
-          found: { type: 'boolean' },
-          reason: { type: 'string' },
-        },
-      },
-    })
+    const session = await runSession(task, { timeout_ms: 120_000 })
 
-    if (!result.success) {
-      return {
-        found: false,
-        product_title: '',
-        price: 0,
-        currency: 'AED',
-        availability: false,
-        delivery_fee: 0,
-        product_url: '',
-        match_confidence: 0,
-        raw_output: result.error ?? 'Browser-Use task failed',
-      }
+    if (session.status === 'error' || session.isTaskSuccessful === false) {
+      return notFound(`Session ${session.status}: ${session.output ?? 'unknown error'}`)
     }
 
-    // Parse the extracted JSON
-    let extracted: Record<string, unknown> = {}
-    if (typeof result.extracted === 'string') {
-      try {
-        // Browser-Use sometimes wraps JSON in markdown
-        const cleaned = result.extracted.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-        extracted = JSON.parse(cleaned)
-      } catch {
-        // Try parsing from natural language output as fallback
-        extracted = parseNaturalLanguagePrice(result.output)
-      }
-    } else if (result.extracted && typeof result.extracted === 'object') {
-      extracted = result.extracted as Record<string, unknown>
+    const raw = session.output ?? ''
+    const parsed = parseJsonOutput(raw)
+
+    if (!parsed) {
+      return notFound(`Could not parse JSON from output: ${raw.slice(0, 200)}`)
     }
 
-    // Check if not found
-    if (extracted.found === false) {
-      console.log(`[Browser-Use] Product not found on ${competitor_name}: ${extracted.reason}`)
-      return {
-        found: false,
-        product_title: '',
-        price: 0,
-        currency: 'AED',
-        availability: false,
-        delivery_fee: 0,
-        product_url: '',
-        match_confidence: 0,
-        raw_output: String(extracted.reason ?? result.output),
-      }
+    if (parsed.found === false) {
+      console.log(`[Browser-Use] Not found on ${competitor_name}: ${parsed.reason}`)
+      return notFound(String(parsed.reason ?? 'Product not found'))
     }
 
-    const confidence = Number(extracted.match_confidence ?? 0)
+    const confidence = Number(parsed.match_confidence ?? 0)
     if (confidence < min_confidence) {
-      console.log(`[Browser-Use] Low confidence (${confidence}) on ${competitor_name} — skipping`)
-      return {
-        found: false,
-        product_title: String(extracted.product_title ?? ''),
-        price: 0,
-        currency: 'AED',
-        availability: false,
-        delivery_fee: 0,
-        product_url: '',
-        match_confidence: confidence,
-        raw_output: result.output,
-      }
+      return notFound(`Confidence too low (${(confidence * 100).toFixed(0)}%) for ${competitor_name}`)
     }
+
+    console.log(`[Browser-Use] ✓ ${competitor_name}: AED ${parsed.price} — "${parsed.product_title}" (${(confidence * 100).toFixed(0)}% confidence)`)
 
     return {
       found: true,
-      product_title: String(extracted.product_title ?? ''),
-      price: Number(extracted.price ?? 0),
+      product_title: String(parsed.product_title ?? ''),
+      price: Number(parsed.price ?? 0),
       currency: 'AED',
-      availability: Boolean(extracted.availability ?? true),
-      delivery_fee: Number(extracted.delivery_fee ?? 0),
-      product_url: String(extracted.product_url ?? competitor_url),
+      availability: Boolean(parsed.availability ?? true),
+      delivery_fee: Number(parsed.delivery_fee ?? 0),
+      product_url: String(parsed.product_url ?? competitor_url),
       match_confidence: confidence,
-      screenshot_base64: result.screenshot,
-      raw_output: result.output,
+      screenshot_url: session.screenshotUrl ?? undefined,
+      live_url: session.liveUrl,
+      raw_output: raw,
     }
   } catch (error) {
-    console.error(`[Browser-Use] Error scraping ${competitor_name}:`, error)
-    return {
-      found: false,
-      product_title: '',
-      price: 0,
-      currency: 'AED',
-      availability: false,
-      delivery_fee: 0,
-      product_url: '',
-      match_confidence: 0,
-      raw_output: error instanceof Error ? error.message : String(error),
-    }
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`[Browser-Use] Error scraping ${competitor_name}:`, msg)
+    return notFound(msg)
   }
 }
 
-// ─── Screenshot Storage ───────────────────────────────────────────────────────
+// ─── Screenshot Storage ────────────────────────────────────────────────────────
 
 /**
- * Save a base64 screenshot from Browser-Use to Supabase Storage.
- * Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY env vars.
+ * Download a screenshot from Browser-Use and upload it to Supabase Storage.
+ * Returns the public URL or null if Supabase is not configured.
  */
 export async function saveScreenshotToSupabase(
-  base64Image: string,
+  screenshotUrl: string,
   fileName: string,
   bucket = 'screenshots'
 ): Promise<string | null> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!supabaseUrl || !serviceKey) {
+    console.warn('[Screenshot] Supabase not configured — screenshot not saved')
+    return null
+  }
+
   try {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    // Download from Browser-Use CDN
+    const imgRes = await fetch(screenshotUrl)
+    if (!imgRes.ok) return null
+    const buffer = await imgRes.arrayBuffer()
 
-    if (!supabaseUrl || !serviceKey) {
-      console.warn('[Screenshot] Supabase not configured — screenshot not saved')
-      return null
-    }
-
-    // Strip base64 prefix if present
-    const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, '')
-    const buffer = Buffer.from(base64Data, 'base64')
-
+    // Upload to Supabase Storage
     const uploadRes = await fetch(
       `${supabaseUrl}/storage/v1/object/${bucket}/${fileName}`,
       {
@@ -323,7 +255,6 @@ export async function saveScreenshotToSupabase(
       return null
     }
 
-    // Return public URL
     return `${supabaseUrl}/storage/v1/object/public/${bucket}/${fileName}`
   } catch (err) {
     console.error('[Screenshot] Error:', err)
@@ -331,23 +262,26 @@ export async function saveScreenshotToSupabase(
   }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Fallback: try to extract price info from natural language output
- * when JSON parsing fails.
- */
-function parseNaturalLanguagePrice(text: string): Record<string, unknown> {
-  const priceMatch = text.match(/(?:price|AED|cost)[:\s]+(?:AED\s*)?(\d[\d,]*(?:\.\d+)?)/i)
-  const availMatch = text.match(/\b(in stock|available|out of stock|unavailable)\b/i)
-  const urlMatch = text.match(/https?:\/\/[^\s"']+/i)
-
+function notFound(reason: string): ScrapedPriceResult {
   return {
-    price: priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0,
-    availability: availMatch ? !availMatch[1].toLowerCase().includes('out') : true,
-    product_url: urlMatch ? urlMatch[0] : '',
-    match_confidence: 0.5,
-    product_title: '',
-    delivery_fee: 0,
+    found: false, product_title: '', price: 0, currency: 'AED',
+    availability: false, delivery_fee: 0, product_url: '',
+    match_confidence: 0, raw_output: reason,
+  }
+}
+
+function parseJsonOutput(text: string): Record<string, unknown> | null {
+  if (!text) return null
+  try {
+    // Strip markdown code fences if present
+    const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim()
+    // Extract first JSON object
+    const match = cleaned.match(/\{[\s\S]*\}/)
+    if (!match) return null
+    return JSON.parse(match[0])
+  } catch {
+    return null
   }
 }

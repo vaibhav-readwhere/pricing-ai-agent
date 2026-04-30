@@ -147,11 +147,11 @@ export async function scrapeCompetitorPrice(ctx: AgentContext): Promise<ScrapedP
 
     log('success', `[Browser-Use] Found on ${competitor.name}: AED ${result.price} — "${result.product_title}" (confidence: ${(result.match_confidence * 100).toFixed(0)}%)`)
 
-    // Save screenshot to Supabase Storage if captured
+    // Save Browser-Use screenshot to Supabase Storage if available
     let screenshotUrl: string | undefined
-    if (result.screenshot_base64 && competitor.screenshot_required) {
+    if (result.screenshot_url && competitor.screenshot_required) {
       const fileName = `${ctx.run_id}-${competitor.id}-${Date.now()}.png`
-      screenshotUrl = (await saveScreenshotToSupabase(result.screenshot_base64, fileName)) ?? undefined
+      screenshotUrl = (await saveScreenshotToSupabase(result.screenshot_url, fileName)) ?? result.screenshot_url
       if (screenshotUrl) log('info', `Screenshot saved: ${fileName}`)
     }
 
