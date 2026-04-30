@@ -1,12 +1,16 @@
 /**
  * Price Monitoring AI Agent
  *
- * This module implements the core agent workflow for competitor price monitoring.
- * In production, replace the placeholder scraping functions with Playwright/Puppeteer
- * or a headless browser service (Browserless, Apify, Bright Data, etc.)
+ * Uses Browser-Use Cloud API (https://browser-use.com) for AI-powered
+ * competitor scraping — no CSS selectors required.
+ * Set BROWSER_USE_API_KEY in .env.local to enable live scraping.
  */
 
 import type { SKU, Competitor, CompetitorCheck, AgentRun, Recommendation } from '@/types'
+import {
+  scrapeCompetitorPriceViaBrowserUse,
+  saveScreenshotToSupabase,
+} from './browser-use'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -110,83 +114,60 @@ async function storeScreenshot(
 
 /**
  * Find and extract the best matching product from a competitor site for a given SKU.
- * Returns null if no suitable match is found above the confidence threshold.
+ * Powered by Browser-Use Cloud API — AI navigates the site and extracts data.
+ * Falls back gracefully if BROWSER_USE_API_KEY is not set (returns null).
  */
 export async function scrapeCompetitorPrice(ctx: AgentContext): Promise<ScrapedProduct | null> {
   const { sku, competitor, log } = ctx
 
-  log('info', `Visiting ${competitor.name} — searching for "${sku.product_name}"`)
+  // Require API key — skip gracefully in demo/dev mode
+  if (!process.env.BROWSER_USE_API_KEY) {
+    log('warn', `BROWSER_USE_API_KEY not set — skipping live scrape for ${competitor.name}`)
+    return null
+  }
+
+  log('info', `[Browser-Use] Visiting ${competitor.name} — searching for "${sku.product_name}"`)
 
   try {
-    // 1. Launch browser session
-    const { sessionId } = await launchBrowserSession(competitor.website_url)
+    // Browser-Use AI navigates, searches, matches, and extracts — all automatically
+    const result = await scrapeCompetitorPriceViaBrowserUse({
+      product_name: sku.product_name,
+      brand: sku.brand,
+      sku_id: sku.sku_id,
+      competitor_name: competitor.name,
+      competitor_url: competitor.website_url,
+      search_url_pattern: competitor.search_url_pattern,
+      min_confidence: competitor.matching_rules.title_similarity_threshold,
+    })
 
-    // 2. Build search URL
-    const searchQuery = `${sku.brand} ${sku.product_name}`.trim()
-    const searchUrl = competitor.search_url_pattern.replace('{query}', encodeURIComponent(searchQuery))
-
-    // 3. Search for the product
-    const { results, screenshotPath: searchScreenshot } = await searchCompetitorProduct(searchUrl, searchQuery, sessionId)
-
-    if (results.length === 0) {
-      log('warn', `No results found on ${competitor.name} for "${searchQuery}"`)
+    if (!result.found) {
+      log('warn', `[Browser-Use] No confident match on ${competitor.name}: ${result.raw_output}`)
       return null
     }
 
-    // 4. Find the best matching result
-    let bestMatch = results[0]
-    let bestScore = 0
-    for (const result of results) {
-      const score = calculateTitleSimilarity(sku.product_name, result.title)
-      if (score > bestScore) { bestScore = score; bestMatch = result }
+    log('success', `[Browser-Use] Found on ${competitor.name}: AED ${result.price} — "${result.product_title}" (confidence: ${(result.match_confidence * 100).toFixed(0)}%)`)
+
+    // Save screenshot to Supabase Storage if captured
+    let screenshotUrl: string | undefined
+    if (result.screenshot_base64 && competitor.screenshot_required) {
+      const fileName = `${ctx.run_id}-${competitor.id}-${Date.now()}.png`
+      screenshotUrl = (await saveScreenshotToSupabase(result.screenshot_base64, fileName)) ?? undefined
+      if (screenshotUrl) log('info', `Screenshot saved: ${fileName}`)
     }
-
-    log('info', `Best match on ${competitor.name}: "${bestMatch.title}" (confidence: ${(bestScore * 100).toFixed(0)}%)`)
-
-    // 5. Check confidence threshold
-    if (bestScore < competitor.matching_rules.title_similarity_threshold) {
-      log('warn', `Match confidence too low (${(bestScore * 100).toFixed(0)}%) — skipping ${competitor.name}`)
-      return null
-    }
-
-    // 6. Brand match check
-    if (competitor.matching_rules.brand_match_required) {
-      const titleLower = bestMatch.title.toLowerCase()
-      if (!titleLower.includes(sku.brand.toLowerCase())) {
-        log('warn', `Brand match required but "${sku.brand}" not found in title — skipping`)
-        return null
-      }
-    }
-
-    // 7. Extract detailed product info
-    const { price, availability, delivery_fee, screenshotPath: productScreenshot } = await extractProductDetails(
-      bestMatch.url, competitor.price_selector, sessionId
-    )
-
-    // 8. Store screenshots if required
-    let searchScreenshotUrl: string | undefined
-    let productScreenshotUrl: string | undefined
-    if (competitor.screenshot_required) {
-      if (searchScreenshot) searchScreenshotUrl = await storeScreenshot(searchScreenshot, `${ctx.run_id}-${competitor.id}-search.png`)
-      if (productScreenshot) productScreenshotUrl = await storeScreenshot(productScreenshot, `${ctx.run_id}-${competitor.id}-product.png`)
-      log('info', `Screenshots captured for ${competitor.name}`)
-    }
-
-    log('success', `Found on ${competitor.name}: AED ${price} — Available: ${availability}`)
 
     return {
-      title: bestMatch.title,
-      price,
-      currency: 'AED',
-      availability,
-      delivery_fee,
-      product_url: bestMatch.url,
-      match_confidence: bestScore,
-      screenshot_search_url: searchScreenshotUrl,
-      screenshot_product_url: productScreenshotUrl,
+      title: result.product_title,
+      price: result.price,
+      currency: result.currency,
+      availability: result.availability,
+      delivery_fee: result.delivery_fee,
+      product_url: result.product_url,
+      match_confidence: result.match_confidence,
+      screenshot_search_url: screenshotUrl,
+      screenshot_product_url: screenshotUrl,
     }
   } catch (error) {
-    log('error', `Failed to scrape ${competitor.name}: ${error instanceof Error ? error.message : String(error)}`)
+    log('error', `[Browser-Use] Failed for ${competitor.name}: ${error instanceof Error ? error.message : String(error)}`)
     return null
   }
 }
