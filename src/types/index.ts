@@ -16,6 +16,7 @@ export interface SKU {
   category: string
   current_price: number
   product_url?: string
+  image_url?: string
   target_marketplace?: string
   competitor_urls?: string[]
   min_price: number

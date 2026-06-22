@@ -1,16 +1,15 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Topbar } from '@/components/layout/topbar'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input, TextArea, Select } from '@/components/ui/input'
+import { Input, TextArea } from '@/components/ui/input'
 import { Modal } from '@/components/ui/modal'
 import { Table, Thead, Th, Tbody, Tr, Td } from '@/components/ui/table'
-import { mockEmailAlerts } from '@/lib/mock-data'
 import { formatCurrency, formatDateTime, formatRelativeTime, getStatusColor } from '@/lib/utils'
 import type { EmailAlert } from '@/types'
-import { Mail, CheckCircle, XCircle, Clock, Eye, Send, Edit2, AlertTriangle, TrendingDown, TrendingUp } from 'lucide-react'
+import { Mail, CheckCircle, XCircle, Clock, Eye, Send, Edit2, AlertTriangle, TrendingDown, TrendingUp, Loader2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 function AlertPreviewModal({ alert, onClose }: { alert: EmailAlert; onClose: () => void }) {
@@ -19,9 +18,7 @@ function AlertPreviewModal({ alert, onClose }: { alert: EmailAlert; onClose: () 
   return (
     <Modal open={true} onClose={onClose} title="Email Preview" size="lg">
       <div className="p-6">
-        {/* Email mockup */}
         <div className="border border-gray-200 rounded-xl overflow-hidden">
-          {/* Email header */}
           <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
             <div className="space-y-1 text-xs text-gray-600">
               <div className="flex gap-2"><span className="text-gray-400 w-12">From:</span><span>PriceWatch AI &lt;alerts@pricewatch.ai&gt;</span></div>
@@ -30,7 +27,6 @@ function AlertPreviewModal({ alert, onClose }: { alert: EmailAlert; onClose: () 
               {alert.sent_at && <div className="flex gap-2"><span className="text-gray-400 w-12">Sent:</span><span>{formatDateTime(alert.sent_at)}</span></div>}
             </div>
           </div>
-          {/* Email body */}
           <div className="bg-white p-6">
             <div className={`border-l-4 ${isOverpriced ? 'border-red-400' : 'border-blue-400'} pl-4 mb-5`}>
               <p className={`text-base font-bold ${isOverpriced ? 'text-red-700' : 'text-blue-700'}`}>
@@ -38,7 +34,6 @@ function AlertPreviewModal({ alert, onClose }: { alert: EmailAlert; onClose: () 
               </p>
               <p className="text-sm text-gray-600 mt-1">{alert.sku_name}</p>
             </div>
-
             <div className="grid grid-cols-3 gap-3 mb-5">
               <div className="bg-gray-50 rounded-lg p-3 text-center">
                 <p className="text-[10px] text-gray-400 uppercase font-medium">Our Price</p>
@@ -53,21 +48,14 @@ function AlertPreviewModal({ alert, onClose }: { alert: EmailAlert; onClose: () 
                 <p className="text-xl font-bold text-indigo-700 mt-1">{formatCurrency(alert.preview_data.recommended_price)}</p>
               </div>
             </div>
-
             <div className="bg-gray-50 rounded-lg p-4 mb-4">
               <p className="text-xs font-semibold text-gray-700 mb-1">Reason for Alert</p>
               <p className="text-sm text-gray-600">{alert.preview_data.reason}</p>
             </div>
-
             <div className="flex gap-3">
-              <button className="flex-1 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg text-center">
-                Review Recommendation
-              </button>
-              <button className="flex-1 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg text-center">
-                View Full Report
-              </button>
+              <button className="flex-1 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg text-center">Review Recommendation</button>
+              <button className="flex-1 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg text-center">View Full Report</button>
             </div>
-
             <p className="text-[10px] text-gray-400 mt-4 text-center">
               PriceWatch AI · Automated at {alert.sent_at ? formatDateTime(alert.sent_at) : 'Pending'} · Unsubscribe
             </p>
@@ -124,21 +112,34 @@ Please review and take action in the PriceWatch dashboard.
 }
 
 export default function AlertsPage() {
-  const [alerts, setAlerts] = useState(mockEmailAlerts)
+  const [alerts, setAlerts] = useState<EmailAlert[]>([])
+  const [loading, setLoading] = useState(true)
+  const [stats, setStats] = useState({ sent: 0, failed: 0, pending: 0 })
   const [previewAlert, setPreviewAlert] = useState<EmailAlert | undefined>()
   const [showTemplate, setShowTemplate] = useState(false)
 
+  useEffect(() => {
+    fetch('/api/alerts')
+      .then(r => r.json())
+      .then(json => {
+        setAlerts(json.data ?? [])
+        setStats(json.stats ?? { sent: 0, failed: 0, pending: 0 })
+      })
+      .catch(() => toast.error('Failed to load alerts'))
+      .finally(() => setLoading(false))
+  }, [])
+
   const resend = async (id: string) => {
     toast.loading('Resending...', { id: 'resend' })
-    await new Promise(r => setTimeout(r, 1500))
-    setAlerts(prev => prev.map(a => a.id === id ? { ...a, status: 'sent', sent_at: new Date().toISOString() } : a))
-    toast.success('Alert resent successfully', { id: 'resend' })
-  }
-
-  const statusCounts = {
-    sent: alerts.filter(a => a.status === 'sent').length,
-    failed: alerts.filter(a => a.status === 'failed').length,
-    pending: alerts.filter(a => a.status === 'pending').length,
+    try {
+      const res = await fetch(`/api/alerts/${id}`, { method: 'POST' })
+      if (!res.ok) { toast.error('Failed to resend', { id: 'resend' }); return }
+      setAlerts(prev => prev.map(a => a.id === id ? { ...a, status: 'pending' as const, error_message: undefined, sent_at: undefined } : a))
+      setStats(prev => ({ ...prev, failed: prev.failed - 1, pending: prev.pending + 1 }))
+      toast.success('Alert queued for resend', { id: 'resend' })
+    } catch {
+      toast.error('Failed to resend', { id: 'resend' })
+    }
   }
 
   return (
@@ -150,15 +151,15 @@ export default function AlertsPage() {
         <div className="grid grid-cols-3 gap-4">
           <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-3">
             <div className="p-2 bg-emerald-50 rounded-lg"><CheckCircle size={18} className="text-emerald-600" /></div>
-            <div><p className="text-2xl font-bold text-gray-900">{statusCounts.sent}</p><p className="text-xs text-gray-500">Sent Successfully</p></div>
+            <div><p className="text-2xl font-bold text-gray-900">{stats.sent}</p><p className="text-xs text-gray-500">Sent Successfully</p></div>
           </div>
           <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-3">
             <div className="p-2 bg-red-50 rounded-lg"><XCircle size={18} className="text-red-600" /></div>
-            <div><p className="text-2xl font-bold text-gray-900">{statusCounts.failed}</p><p className="text-xs text-gray-500">Failed</p></div>
+            <div><p className="text-2xl font-bold text-gray-900">{stats.failed}</p><p className="text-xs text-gray-500">Failed</p></div>
           </div>
           <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-3">
             <div className="p-2 bg-amber-50 rounded-lg"><Clock size={18} className="text-amber-600" /></div>
-            <div><p className="text-2xl font-bold text-gray-900">{statusCounts.pending}</p><p className="text-xs text-gray-500">Pending</p></div>
+            <div><p className="text-2xl font-bold text-gray-900">{stats.pending}</p><p className="text-xs text-gray-500">Pending</p></div>
           </div>
         </div>
 
@@ -187,12 +188,16 @@ export default function AlertsPage() {
               </tr>
             </Thead>
             <Tbody>
-              {alerts.map(alert => {
-                const isOverpriced = alert.preview_data.competitor_price < alert.preview_data.our_price
+              {loading ? (
+                <Tr><Td colSpan={10}><div className="py-12 text-center"><Loader2 size={20} className="mx-auto text-gray-300 animate-spin mb-2" /><p className="text-sm text-gray-400">Loading alerts…</p></div></Td></Tr>
+              ) : alerts.length === 0 ? (
+                <Tr><Td colSpan={10}><div className="py-12 text-center"><Mail size={28} className="mx-auto text-gray-200 mb-2" /><p className="text-sm text-gray-400">No alerts yet — they appear after the agent runs and detects price mismatches.</p></div></Td></Tr>
+              ) : alerts.map(alert => {
+                const isOverpriced = alert.preview_data?.competitor_price < alert.preview_data?.our_price
                 return (
                   <Tr key={alert.id}>
                     <Td>
-                      <div className="max-w-[140px]">
+                      <div className="max-w-36">
                         <p className="text-xs font-medium text-gray-900 truncate">{alert.sku_name}</p>
                       </div>
                     </Td>
@@ -203,14 +208,14 @@ export default function AlertsPage() {
                       </div>
                     </Td>
                     <Td><span className="text-xs text-gray-600">{alert.recipient}</span></Td>
-                    <Td><span className="text-xs font-medium">{formatCurrency(alert.preview_data.our_price)}</span></Td>
-                    <Td><span className="text-xs text-gray-600">{alert.preview_data.competitor_name}</span></Td>
+                    <Td><span className="text-xs font-medium">{formatCurrency(alert.preview_data?.our_price)}</span></Td>
+                    <Td><span className="text-xs text-gray-600">{alert.preview_data?.competitor_name}</span></Td>
                     <Td>
                       <span className={`text-xs font-semibold ${isOverpriced ? 'text-red-600' : 'text-blue-600'}`}>
-                        {formatCurrency(alert.preview_data.competitor_price)}
+                        {formatCurrency(alert.preview_data?.competitor_price)}
                       </span>
                     </Td>
-                    <Td><span className="text-xs font-semibold text-indigo-600">{formatCurrency(alert.preview_data.recommended_price)}</span></Td>
+                    <Td><span className="text-xs font-semibold text-indigo-600">{formatCurrency(alert.preview_data?.recommended_price)}</span></Td>
                     <Td>
                       <Badge className={alert.status === 'sent' ? 'bg-emerald-100 text-emerald-700' : alert.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}>
                         {alert.status === 'sent' ? <CheckCircle size={9} className="mr-1" /> : alert.status === 'failed' ? <XCircle size={9} className="mr-1" /> : null}
@@ -221,7 +226,7 @@ export default function AlertsPage() {
                       {alert.sent_at
                         ? <span className="text-xs text-gray-500">{formatRelativeTime(alert.sent_at)}</span>
                         : alert.error_message
-                          ? <span className="text-[10px] text-red-500 truncate max-w-[100px] block">{alert.error_message}</span>
+                          ? <span className="text-[10px] text-red-500 truncate max-w-25 block">{alert.error_message}</span>
                           : <span className="text-xs text-gray-400">—</span>}
                     </Td>
                     <Td>
@@ -239,7 +244,6 @@ export default function AlertsPage() {
           </Table>
         </Card>
 
-        {/* SMTP Config hint */}
         <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 flex items-start gap-3">
           <AlertTriangle size={16} className="text-amber-500 mt-0.5 shrink-0" />
           <div>

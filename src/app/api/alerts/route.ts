@@ -1,13 +1,3 @@
-import { NextResponse } from 'next/server'
-import { mockEmailAlerts } from '@/lib/mock-data'
+import { AlertController } from '@/lib/controllers/AlertController'
 
-export async function GET() {
-  return NextResponse.json({
-    data: mockEmailAlerts,
-    total: mockEmailAlerts.length,
-    stats: {
-      sent: mockEmailAlerts.filter(a => a.status === 'sent').length,
-      failed: mockEmailAlerts.filter(a => a.status === 'failed').length,
-    },
-  })
-}
+export const GET = AlertController.list.bind(AlertController)

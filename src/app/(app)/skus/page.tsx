@@ -1,19 +1,17 @@
 'use client'
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Topbar } from '@/components/layout/topbar'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Card, CardHeader, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input, Select } from '@/components/ui/input'
 import { Modal } from '@/components/ui/modal'
 import { Table, Thead, Th, Tbody, Tr, Td } from '@/components/ui/table'
-import { mockSKUs, mockCompetitors } from '@/lib/mock-data'
 import { formatCurrency, formatRelativeTime, getStatusColor } from '@/lib/utils'
-import type { SKU } from '@/types'
+import type { SKU, Competitor } from '@/types'
 import {
-  Upload, Plus, Search, Filter, Edit2, Trash2, Eye,
-  Download, Package, CheckCircle, PauseCircle, Clock,
-  ChevronDown, X
+  Upload, Plus, Search, Edit2, Trash2, Eye,
+  Download, Package, CheckCircle, PauseCircle, Clock, Loader2, ImagePlus, X
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Papa from 'papaparse'
@@ -41,7 +39,20 @@ const CATEGORY_OPTIONS = [
   { value: 'Televisions', label: 'Televisions' },
 ]
 
-function SKUFormModal({ open, onClose, sku }: { open: boolean; onClose: () => void; sku?: SKU }) {
+function SKUFormModal({
+  open, onClose, sku, competitors, onSave,
+}: {
+  open: boolean
+  onClose: () => void
+  sku?: SKU
+  competitors: Competitor[]
+  onSave: (saved: SKU) => void
+}) {
+  const [saving, setSaving] = useState(false)
+  const [imageUrl, setImageUrl] = useState(sku?.image_url || '')
+  const [imagePreview, setImagePreview] = useState(sku?.image_url || '')
+  const [uploadingImage, setUploadingImage] = useState(false)
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const [form, setForm] = useState({
     sku_id: sku?.sku_id || '',
     product_name: sku?.product_name || '',
@@ -52,25 +63,114 @@ function SKUFormModal({ open, onClose, sku }: { open: boolean; onClose: () => vo
     target_marketplace: sku?.target_marketplace || 'UAE',
     min_price: sku?.min_price?.toString() || '',
     max_price: sku?.max_price?.toString() || '',
-    margin_threshold: sku?.margin_threshold?.toString() || '',
+    margin_threshold: sku?.margin_threshold?.toString() || '8',
     alert_recipients: sku?.alert_recipients?.join(', ') || '',
     monitoring_frequency: sku?.monitoring_frequency || 'daily',
   })
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }))
 
-  const handleSave = () => {
+  const handleImagePick = async (file: File) => {
+    setImagePreview(URL.createObjectURL(file))
+    setUploadingImage(true)
+    try {
+      const fd = new FormData()
+      fd.append('image', file)
+      const res = await fetch('/api/skus/upload-image', { method: 'POST', body: fd })
+      const json = await res.json()
+      if (!res.ok) { toast.error(json.error || 'Upload failed'); setImagePreview(imageUrl); return }
+      setImageUrl(json.url)
+    } finally {
+      setUploadingImage(false)
+    }
+  }
+
+  const handleSave = async () => {
     if (!form.sku_id || !form.product_name) {
       toast.error('SKU ID and Product Name are required')
       return
     }
-    toast.success(sku ? 'SKU updated successfully' : 'SKU added successfully')
-    onClose()
+    setSaving(true)
+    try {
+      const payload = {
+        ...form,
+        current_price: Number(form.current_price),
+        min_price: Number(form.min_price),
+        max_price: Number(form.max_price),
+        margin_threshold: Number(form.margin_threshold),
+        alert_recipients: form.alert_recipients.split(',').map(e => e.trim()).filter(Boolean),
+        image_url: imageUrl || null,
+      }
+      const url = sku ? `/api/skus/${sku.id}` : '/api/skus'
+      const method = sku ? 'PATCH' : 'POST'
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const json = await res.json()
+      if (!res.ok) { toast.error(json.error || 'Failed to save'); return }
+      onSave(json.data)
+      toast.success(sku ? 'SKU updated' : 'SKU added')
+      onClose()
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
     <Modal open={open} onClose={onClose} title={sku ? 'Edit SKU' : 'Add New SKU'} size="xl">
       <div className="p-6 space-y-4">
+
+        {/* Product Image */}
+        <div>
+          <p className="text-xs font-medium text-gray-700 mb-2">Product Image</p>
+          <div className="flex items-start gap-4">
+            <div
+              className="relative w-24 h-24 rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 flex items-center justify-center cursor-pointer hover:border-indigo-300 hover:bg-indigo-50 transition-colors overflow-hidden shrink-0"
+              onClick={() => imageInputRef.current?.click()}
+            >
+              {imagePreview ? (
+                <>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={imagePreview} alt="product" className="w-full h-full object-cover" />
+                  {uploadingImage && (
+                    <div className="absolute inset-0 bg-white/70 flex items-center justify-center">
+                      <Loader2 size={16} className="animate-spin text-indigo-500" />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-center">
+                  {uploadingImage
+                    ? <Loader2 size={20} className="mx-auto text-indigo-400 animate-spin" />
+                    : <ImagePlus size={20} className="mx-auto text-gray-300" />}
+                </div>
+              )}
+            </div>
+            <div className="flex-1">
+              <p className="text-xs text-gray-500">Click the box to upload a product image</p>
+              <p className="text-[10px] text-gray-400 mt-0.5">JPG, PNG, WebP — max 5 MB</p>
+              {imagePreview && (
+                <button
+                  type="button"
+                  onClick={() => { setImageUrl(''); setImagePreview('') }}
+                  className="mt-2 flex items-center gap-1 text-[10px] text-red-500 hover:text-red-700"
+                >
+                  <X size={10} /> Remove image
+                </button>
+              )}
+            </div>
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              className="hidden"
+              onChange={e => { const f = e.target.files?.[0]; if (f) handleImagePick(f) }}
+            />
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-4">
           <Input label="SKU ID *" placeholder="APPL-IP15P-256-BLK" value={form.sku_id} onChange={set('sku_id')} />
           <Input label="Product Name *" placeholder="Apple iPhone 15 Pro 256GB" value={form.product_name} onChange={set('product_name')} />
@@ -86,39 +186,43 @@ function SKUFormModal({ open, onClose, sku }: { open: boolean; onClose: () => vo
         </div>
         <Input label="Product URL (optional)" placeholder="https://yourstore.com/product" value={form.product_url} onChange={set('product_url')} />
         <Input label="Alert Recipients (comma-separated emails)" placeholder="pricing@company.com, manager@company.com" value={form.alert_recipients} onChange={set('alert_recipients')} />
-        <div>
-          <p className="text-xs font-medium text-gray-700 mb-2">Assign Competitors</p>
-          <div className="grid grid-cols-3 gap-2">
-            {mockCompetitors.map(c => (
-              <label key={c.id} className="flex items-center gap-2 p-2 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">
-                <input type="checkbox" defaultChecked={c.status === 'active'} className="rounded text-indigo-600" />
-                <span className="text-xs text-gray-700">{c.name}</span>
-              </label>
-            ))}
+        {competitors.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-gray-700 mb-2">Active Competitors</p>
+            <div className="grid grid-cols-3 gap-2">
+              {competitors.map(c => (
+                <div key={c.id} className="flex items-center gap-2 p-2 border border-gray-200 rounded-lg bg-gray-50">
+                  <span className="text-xs text-gray-700">{c.logo} {c.name}</span>
+                  <Badge className={`ml-auto text-[9px] ${getStatusColor(c.status)}`}>{c.status}</Badge>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
       <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button onClick={handleSave}>{sku ? 'Save Changes' : 'Add SKU'}</Button>
+        <Button onClick={handleSave} disabled={saving}>
+          {saving && <Loader2 size={14} className="animate-spin" />}
+          {sku ? 'Save Changes' : 'Add SKU'}
+        </Button>
       </div>
     </Modal>
   )
 }
 
-function CSVUploadModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function CSVUploadModal({ open, onClose, onImport }: { open: boolean; onClose: () => void; onImport: () => void }) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const [preview, setPreview] = useState<Record<string, string>[]>([])
   const [fileName, setFileName] = useState('')
+  const [importing, setImporting] = useState(false)
 
   const handleFile = (file: File) => {
     setFileName(file.name)
     Papa.parse(file, {
       header: true, skipEmptyLines: true,
-      complete: (results) => {
-        setPreview((results.data as Record<string, string>[]).slice(0, 5))
-      }
+      complete: (results) => setPreview((results.data as Record<string, string>[]).slice(0, 5))
     })
   }
 
@@ -128,8 +232,30 @@ function CSVUploadModal({ open, onClose }: { open: boolean; onClose: () => void 
     if (file) handleFile(file)
   }
 
-  const handleImport = () => {
-    toast.success(`${preview.length} SKUs imported (demo mode)`)
+  const handleImport = async () => {
+    if (!preview.length) return
+    setImporting(true)
+    let successCount = 0
+    for (const row of preview) {
+      try {
+        const res = await fetch('/api/skus', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...row,
+            current_price: Number(row.current_price),
+            min_price: Number(row.min_price),
+            max_price: Number(row.max_price),
+            margin_threshold: Number(row.margin_threshold) || 8,
+            alert_recipients: row.alert_recipients ? row.alert_recipients.split(',').map((e: string) => e.trim()) : [],
+          }),
+        })
+        if (res.ok) successCount++
+      } catch { /* skip bad rows */ }
+    }
+    setImporting(false)
+    toast.success(`${successCount} SKUs imported`)
+    onImport()
     onClose()
   }
 
@@ -144,12 +270,12 @@ function CSVUploadModal({ open, onClose }: { open: boolean; onClose: () => void 
         >
           <Upload size={32} className="mx-auto text-gray-300 mb-3" />
           <p className="text-sm font-medium text-gray-700">Drag & drop your CSV or XLSX file here</p>
-          <p className="text-xs text-gray-400 mt-1">Supports .csv and .xlsx formats up to 10MB</p>
+          <p className="text-xs text-gray-400 mt-1">Supports .csv formats up to 10MB</p>
           <button onClick={() => fileRef.current?.click()}
             className="mt-3 px-4 py-2 text-xs font-medium text-indigo-600 border border-indigo-200 rounded-lg hover:bg-indigo-50">
             Browse File
           </button>
-          <input ref={fileRef} type="file" accept=".csv,.xlsx" className="hidden"
+          <input ref={fileRef} type="file" accept=".csv" className="hidden"
             onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])} />
           {fileName && <p className="mt-2 text-xs text-gray-600 font-medium">✓ {fileName}</p>}
         </div>
@@ -176,7 +302,7 @@ function CSVUploadModal({ open, onClose }: { open: boolean; onClose: () => void 
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {preview.map((row, i) => (
-                    <tr key={i}>{Object.values(row).map((v, j) => <td key={j} className="px-2 py-1 text-gray-600 truncate max-w-[120px]">{v}</td>)}</tr>
+                    <tr key={i}>{Object.values(row).map((v, j) => <td key={j} className="px-2 py-1 text-gray-600 truncate max-w-30">{v}</td>)}</tr>
                   ))}
                 </tbody>
               </table>
@@ -186,14 +312,19 @@ function CSVUploadModal({ open, onClose }: { open: boolean; onClose: () => void 
       </div>
       <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button onClick={handleImport} disabled={!fileName}>Import SKUs</Button>
+        <Button onClick={handleImport} disabled={!fileName || importing}>
+          {importing && <Loader2 size={14} className="animate-spin" />}
+          Import SKUs
+        </Button>
       </div>
     </Modal>
   )
 }
 
 export default function SKUsPage() {
-  const [skus, setSkus] = useState(mockSKUs)
+  const [skus, setSkus] = useState<SKU[]>([])
+  const [competitors, setCompetitors] = useState<Competitor[]>([])
+  const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
@@ -202,21 +333,53 @@ export default function SKUsPage() {
   const [editSKU, setEditSKU] = useState<SKU | undefined>()
   const [viewSKU, setViewSKU] = useState<SKU | undefined>()
 
-  const filtered = skus.filter(s => {
-    const matchSearch = s.product_name.toLowerCase().includes(search.toLowerCase()) ||
-      s.sku_id.toLowerCase().includes(search.toLowerCase()) ||
-      s.brand.toLowerCase().includes(search.toLowerCase())
-    const matchStatus = !statusFilter || s.status === statusFilter
-    const matchCategory = !categoryFilter || s.category === categoryFilter
-    return matchSearch && matchStatus && matchCategory
-  })
+  const loadData = useCallback(async () => {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams()
+      if (statusFilter) params.set('status', statusFilter)
+      if (categoryFilter) params.set('category', categoryFilter)
+      if (search) params.set('search', search)
 
-  const toggleStatus = (id: string) => {
-    setSkus(prev => prev.map(s => s.id === id ? { ...s, status: s.status === 'active' ? 'paused' : 'active' } : s))
-    toast.success('SKU status updated')
+      const [skuRes, compRes] = await Promise.all([
+        fetch(`/api/skus?${params}`),
+        fetch('/api/competitors'),
+      ])
+      const [skuJson, compJson] = await Promise.all([skuRes.json(), compRes.json()])
+      setSkus(skuJson.data ?? [])
+      setCompetitors(compJson.data ?? [])
+    } catch {
+      toast.error('Failed to load data')
+    } finally {
+      setLoading(false)
+    }
+  }, [search, statusFilter, categoryFilter])
+
+  useEffect(() => { loadData() }, [loadData])
+
+  const handleSaved = (saved: SKU) => {
+    setSkus(prev => {
+      const idx = prev.findIndex(s => s.id === saved.id)
+      if (idx >= 0) { const next = [...prev]; next[idx] = saved; return next }
+      return [saved, ...prev]
+    })
   }
 
-  const deleteSKU = (id: string) => {
+  const toggleStatus = async (sku: SKU) => {
+    const newStatus = sku.status === 'active' ? 'paused' : 'active'
+    const res = await fetch(`/api/skus/${sku.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    })
+    if (!res.ok) { toast.error('Failed to update status'); return }
+    setSkus(prev => prev.map(s => s.id === sku.id ? { ...s, status: newStatus } : s))
+    toast.success('Status updated')
+  }
+
+  const deleteSKU = async (id: string) => {
+    const res = await fetch(`/api/skus/${id}`, { method: 'DELETE' })
+    if (!res.ok) { toast.error('Failed to delete'); return }
     setSkus(prev => prev.filter(s => s.id !== id))
     toast.success('SKU removed')
   }
@@ -224,7 +387,6 @@ export default function SKUsPage() {
   const statusCounts = {
     active: skus.filter(s => s.status === 'active').length,
     paused: skus.filter(s => s.status === 'paused').length,
-    inactive: skus.filter(s => s.status === 'inactive').length,
   }
 
   return (
@@ -265,6 +427,7 @@ export default function SKUsPage() {
           <Table>
             <Thead>
               <tr>
+                <Th>{' '}</Th>
                 <Th>SKU</Th>
                 <Th>Product</Th>
                 <Th>Brand</Th>
@@ -278,11 +441,39 @@ export default function SKUsPage() {
               </tr>
             </Thead>
             <Tbody>
-              {filtered.map(sku => (
+              {loading ? (
+                <Tr>
+                  <Td colSpan={11}>
+                    <div className="py-12 text-center">
+                      <Loader2 size={24} className="mx-auto text-gray-300 animate-spin mb-2" />
+                      <p className="text-sm text-gray-400">Loading SKUs…</p>
+                    </div>
+                  </Td>
+                </Tr>
+              ) : skus.length === 0 ? (
+                <Tr>
+                  <Td colSpan={11}>
+                    <div className="py-12 text-center">
+                      <Package size={32} className="mx-auto text-gray-200 mb-2" />
+                      <p className="text-sm text-gray-400">No SKUs found — add your first SKU</p>
+                    </div>
+                  </Td>
+                </Tr>
+              ) : skus.map(sku => (
                 <Tr key={sku.id}>
+                  <Td>
+                    {sku.image_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={sku.image_url} alt={sku.product_name} className="w-9 h-9 rounded-lg object-cover border border-gray-100" />
+                    ) : (
+                      <div className="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
+                        <Package size={14} className="text-gray-300" />
+                      </div>
+                    )}
+                  </Td>
                   <Td><code className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-700">{sku.sku_id}</code></Td>
                   <Td>
-                    <div className="max-w-[200px]">
+                    <div className="max-w-50">
                       <p className="text-xs font-medium text-gray-900 truncate">{sku.product_name}</p>
                     </div>
                   </Td>
@@ -305,7 +496,7 @@ export default function SKUsPage() {
                     <div className="flex items-center gap-1">
                       <button title="View" onClick={() => setViewSKU(sku)} className="p-1 rounded text-gray-400 hover:text-indigo-600 hover:bg-indigo-50"><Eye size={14} /></button>
                       <button title="Edit" onClick={() => setEditSKU(sku)} className="p-1 rounded text-gray-400 hover:text-indigo-600 hover:bg-indigo-50"><Edit2 size={14} /></button>
-                      <button title={sku.status === 'active' ? 'Pause' : 'Resume'} onClick={() => toggleStatus(sku.id)} className="p-1 rounded text-gray-400 hover:text-amber-600 hover:bg-amber-50">
+                      <button title={sku.status === 'active' ? 'Pause' : 'Resume'} onClick={() => toggleStatus(sku)} className="p-1 rounded text-gray-400 hover:text-amber-600 hover:bg-amber-50">
                         {sku.status === 'active' ? <PauseCircle size={14} /> : <CheckCircle size={14} />}
                       </button>
                       <button title="Delete" onClick={() => deleteSKU(sku.id)} className="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={14} /></button>
@@ -315,21 +506,29 @@ export default function SKUsPage() {
               ))}
             </Tbody>
           </Table>
-          {filtered.length === 0 && (
-            <div className="py-12 text-center">
-              <Package size={32} className="mx-auto text-gray-200 mb-2" />
-              <p className="text-sm text-gray-400">No SKUs match your search</p>
-            </div>
-          )}
         </Card>
       </div>
 
-      <SKUFormModal open={showAddModal || !!editSKU} onClose={() => { setShowAddModal(false); setEditSKU(undefined) }} sku={editSKU} />
-      <CSVUploadModal open={showUploadModal} onClose={() => setShowUploadModal(false)} />
+      <SKUFormModal
+        key={editSKU?.id ?? 'new'}
+        open={showAddModal || !!editSKU}
+        onClose={() => { setShowAddModal(false); setEditSKU(undefined) }}
+        sku={editSKU}
+        competitors={competitors}
+        onSave={handleSaved}
+      />
+      <CSVUploadModal open={showUploadModal} onClose={() => setShowUploadModal(false)} onImport={loadData} />
 
       {viewSKU && (
         <Modal open={!!viewSKU} onClose={() => setViewSKU(undefined)} title="SKU Details" size="lg">
           <div className="p-6 space-y-4">
+            {viewSKU.image_url && (
+              <div className="flex justify-center">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={viewSKU.image_url} alt={viewSKU.product_name}
+                  className="h-40 w-auto max-w-full rounded-xl border border-gray-100 object-contain bg-gray-50" />
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               {[
                 ['SKU ID', viewSKU.sku_id],
@@ -343,7 +542,7 @@ export default function SKUsPage() {
                 ['Frequency', viewSKU.monitoring_frequency],
                 ['Status', viewSKU.status],
                 ['Last Checked', viewSKU.last_checked ? formatRelativeTime(viewSKU.last_checked) : 'Never'],
-                ['Alert Recipients', viewSKU.alert_recipients.join(', ')],
+                ['Alert Recipients', viewSKU.alert_recipients?.join(', ') || '—'],
               ].map(([label, value]) => (
                 <div key={label} className="bg-gray-50 rounded-lg p-3">
                   <p className="text-[10px] text-gray-500 uppercase font-medium">{label}</p>
