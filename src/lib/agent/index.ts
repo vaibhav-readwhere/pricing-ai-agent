@@ -1,4 +1,4 @@
-import { execute } from '@/lib/db/connection'
+import { execute, query } from '@/lib/db/connection'
 import { log } from '@/lib/agent/utils/logger'
 import { extractGenericSearchName } from '@/lib/agent/utils/genericName'
 import { startRun } from '@/lib/agent/stages/01_startRun'
@@ -6,6 +6,7 @@ import { searchAndScreenshot } from '@/lib/agent/stages/02_searchScreenshot'
 import { analyzeListing } from '@/lib/agent/stages/03_geminiListing'
 import { clickAndDetail } from '@/lib/agent/stages/04_clickDetail'
 import { extractDetail } from '@/lib/agent/stages/05_geminiDetail'
+import { fetchCachedProductPrice } from '@/lib/agent/stages/fastPriceFetch'
 import { buildRecommendation } from '@/lib/agent/stages/06_recommend'
 import { sendAlertIfNeeded } from '@/lib/agent/stages/07_alert'
 import { finaliseRun } from '@/lib/agent/stages/08_finaliseRun'
@@ -38,6 +39,21 @@ export async function runPricingAgent({
       let checkId: string | undefined
 
       try {
+        // Fast path: if we already have a confirmed high-confidence URL from a previous run,
+        // skip the search + Gemini listing/detail pipeline and fetch price directly from the DOM.
+        const cachedUrl = await getCachedCompetitorUrl(sku.id, competitor.id)
+        if (cachedUrl) {
+          await log('info', `[${sku.sku_id}] ${competitor.name}: cached URL found — skipping search (no Gemini cost)`, { url: cachedUrl }, { runId, skuId: sku.id, competitorId: competitor.id })
+          const fast = await fetchCachedProductPrice({ runId, sku, competitor, cachedUrl })
+          if (fast) {
+            await log('success', `[${sku.sku_id}] ${competitor.name}: price AED ${fast.price} via cached URL (status: ${fast.status})`, { price: fast.price, status: fast.status }, { runId, skuId: sku.id, competitorId: competitor.id })
+            stats.competitorsChecked++
+            continue
+          }
+          // DOM extraction returned null — URL may be stale; fall through to full pipeline
+          await log('warn', `[${sku.sku_id}] ${competitor.name}: cached URL price extraction failed — running full pipeline`, {}, { runId, skuId: sku.id, competitorId: competitor.id })
+        }
+
         await log('info', `[${sku.sku_id}] Searching ${competitor.name}…`, {}, { runId, skuId: sku.id, competitorId: competitor.id })
 
         const { checkId: newCheckId, screenshotPath, searchUrl } = await searchAndScreenshot({
@@ -167,4 +183,19 @@ function initStats() {
     screenshots: 0,
     alertsSent: 0,
   }
+}
+
+// Returns the most recent competitor_url for this SKU+competitor where confidence was ≥0.9.
+// Used to skip the full search pipeline on repeat runs.
+async function getCachedCompetitorUrl(skuId: string, competitorId: string): Promise<string | null> {
+  const rows = await query<{ competitor_url: string }>(
+    `SELECT competitor_url FROM competitor_checks
+     WHERE sku_id = ? AND competitor_id = ?
+       AND match_confidence >= 0.9
+       AND competitor_url IS NOT NULL
+       AND status NOT IN ('error', 'needs_manual_review', 'low_confidence')
+     ORDER BY created_at DESC LIMIT 1`,
+    [skuId, competitorId]
+  )
+  return rows[0]?.competitor_url ?? null
 }
